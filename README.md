@@ -18,6 +18,5 @@ Ejemplos:
 
 ```sh
 ./rw cond lectores 3 2 5 1000 2000
-./rw cond fifo 2 2 3 0 0 notraza
-./rw atomic escritores 1 1 10 0 0
+./rw cond lectores 2 2 3 0 0 notraza
 ```

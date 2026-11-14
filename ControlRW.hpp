@@ -1,7 +1,7 @@
 #ifndef CONTROL_RW_HPP
 #define CONTROL_RW_HPP
 
-// interfaz exigida por el enunciado
+// interfaz comun para monitor y controlador atomico
 class ControlRW {
 public:
     virtual ~ControlRW() = default;

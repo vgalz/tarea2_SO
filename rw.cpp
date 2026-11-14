@@ -8,6 +8,9 @@
 #include <string_view>
 #include <thread>
 #include <vector>
+#include <atomic>
+#include <mutex>
+#include <condition_variable>
 
 enum class Modo { Cond, Atomic };
 
@@ -20,6 +23,61 @@ struct Configuracion {
     long dur_lec_us;
     long dur_esc_us;
     bool traza_habilitada;
+};
+
+struct Registro {
+    long version = 0;
+    long doble_version = 0;
+};
+
+struct Diagnostico {
+    std::atomic<long> lectoras_dentro{0};
+    std::atomic<long> escritoras_dentro{0};
+    std::atomic<long> max_lectoras{0};
+    std::atomic<long> conflictos{0};
+    std::atomic<long> lecturas_incoherentes{0};
+};
+
+// monitor basico de R2
+// sin politica de prioridad aun
+class MonitorRW : public ControlRW {
+public:
+    explicit MonitorRW(Politica p) : politica(p) {}
+
+    void entrar_lectura() override {
+        std::unique_lock<std::mutex> lock(m);
+        puede_entrar.wait(lock, [this] { return !escritora_activa; });
+        ++lectoras_activas;
+    }
+
+    void salir_lectura() override {
+        std::lock_guard<std::mutex> lock(m);
+        --lectoras_activas;
+        if (lectoras_activas == 0) {
+            puede_entrar.notify_all();
+        }
+    }
+
+    void entrar_escritura() override {
+        std::unique_lock<std::mutex> lock(m);
+        puede_entrar.wait(lock, [this] {
+            return !escritora_activa && lectoras_activas == 0;
+        });
+        escritora_activa = true;
+    }
+
+    void salir_escritura() override {
+        std::lock_guard<std::mutex> lock(m);
+        escritora_activa = false;
+        puede_entrar.notify_all();
+    }
+
+private:
+    Politica politica; // implementar despues
+    std::mutex m;
+    std::condition_variable puede_entrar;
+    long lectoras_activas = 0;
+    bool escritora_activa = false;
 };
 
 void mostrar_uso(const char* programa) {
@@ -98,12 +156,54 @@ bool leer_configuracion(int argc, char* argv[], Configuracion& c) {
     return true;
 }
 
-// R1: cada hebra simula K operaciones sin acceder a un registro compartido.
-void ejecutar_hebra(long k, long duracion_us) {
+void simular_trabajo(long duracion_us) {
+    if (duracion_us > 0) {
+        std::this_thread::sleep_for(std::chrono::microseconds(duracion_us));
+    }
+}
+
+void ejecutar_lectora(ControlRW& control, const Registro& registro,
+                     Diagnostico& diagnostico, long k, long duracion_us) {
     for (long op = 0; op < k; ++op) {
-        if (duracion_us > 0) {
-            std::this_thread::sleep_for(std::chrono::microseconds(duracion_us));
+        control.entrar_lectura();
+
+        const long lectoras = diagnostico.lectoras_dentro.fetch_add(1) + 1;
+        if (diagnostico.escritoras_dentro.load() != 0) {
+            ++diagnostico.conflictos;
         }
+
+        long maximo = diagnostico.max_lectoras.load();
+        while (lectoras > maximo &&
+               !diagnostico.max_lectoras.compare_exchange_weak(maximo, lectoras)) {}
+
+        const long version = registro.version;
+        const long doble_version = registro.doble_version;
+        if (doble_version != 2 * version) {
+            ++diagnostico.lecturas_incoherentes;
+        }
+        simular_trabajo(duracion_us);
+
+        --diagnostico.lectoras_dentro;
+        control.salir_lectura();
+    }
+}
+
+void ejecutar_escritora(ControlRW& control, Registro& registro,
+                       Diagnostico& diagnostico, long k, long duracion_us) {
+    for (long op = 0; op < k; ++op) {
+        control.entrar_escritura();
+
+        if (diagnostico.escritoras_dentro.fetch_add(1) + 1 != 1 ||
+            diagnostico.lectoras_dentro.load() != 0) {
+            ++diagnostico.conflictos;
+        }
+
+        ++registro.version;
+        registro.doble_version = 2 * registro.version;
+        simular_trabajo(duracion_us);
+
+        --diagnostico.escritoras_dentro;
+        control.salir_escritura();
     }
 }
 
@@ -114,12 +214,27 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    if (c.modo == Modo::Atomic) {
+        std::cerr << "Error: el modo atomic todavia no esta implementado.\n";
+        return 1;
+    }
+
+    Registro registro;
+    Diagnostico diagnostico;
+    MonitorRW control(c.politica);
     std::vector<std::thread> hebras;
+
     try {
         hebras.reserve(c.L + c.E);
-        for (long i = 0; i < c.L + c.E; ++i) {
-            const long duracion = (i < c.L) ? c.dur_lec_us : c.dur_esc_us;
-            hebras.emplace_back(ejecutar_hebra, c.K, duracion);
+        for (long i = 0; i < c.L; ++i) {
+            hebras.emplace_back([&] {
+                ejecutar_lectora(control, registro, diagnostico, c.K, c.dur_lec_us);
+            });
+        }
+        for (long i = 0; i < c.E; ++i) {
+            hebras.emplace_back([&] {
+                ejecutar_escritora(control, registro, diagnostico, c.K, c.dur_esc_us);
+            });
         }
     } catch (const std::exception& e) {
         std::cerr << "Error al crear hebras: " << e.what() << '\n';
@@ -132,5 +247,18 @@ int main(int argc, char* argv[]) {
     for (auto& hebra : hebras) {
         hebra.join();
     }
+
+    const long total_escrituras = c.E * c.K;
+    if (registro.version != total_escrituras ||
+        registro.doble_version != 2 * total_escrituras ||
+        diagnostico.lecturas_incoherentes.load() != 0 ||
+        diagnostico.conflictos.load() != 0 ||
+        diagnostico.lectoras_dentro.load() != 0 ||
+        diagnostico.escritoras_dentro.load() != 0) {
+        std::cerr << "error: no se cumplieron las invariantes de R2.\n";
+        return 1;
+    }
+
+    std::cout << "maximo de lectoras simultaneas: " << diagnostico.max_lectoras.load() << '\n';
     return 0;
 }
