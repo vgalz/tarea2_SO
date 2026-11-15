@@ -38,15 +38,19 @@ struct Diagnostico {
     std::atomic<long> lecturas_incoherentes{0};
 };
 
-// monitor basico de R2
-// sin politica de prioridad aun
+// monitor principal
 class MonitorRW : public ControlRW {
 public:
     explicit MonitorRW(Politica p) : politica(p) {}
 
     void entrar_lectura() override {
         std::unique_lock<std::mutex> lock(m);
-        puede_entrar.wait(lock, [this] { return !escritora_activa; });
+        ++lectoras_esperando;
+        puede_entrar.wait(lock, [this] {
+            return !escritora_activa &&
+                   (politica == Politica::Lectores || escritoras_esperando == 0);
+        });
+        --lectoras_esperando;
         ++lectoras_activas;
     }
 
@@ -60,9 +64,12 @@ public:
 
     void entrar_escritura() override {
         std::unique_lock<std::mutex> lock(m);
+        ++escritoras_esperando;
         puede_entrar.wait(lock, [this] {
-            return !escritora_activa && lectoras_activas == 0;
+            return !escritora_activa && lectoras_activas == 0 &&
+                   (politica == Politica::Escritores || lectoras_esperando == 0);
         });
+        --escritoras_esperando;
         escritora_activa = true;
     }
 
@@ -73,10 +80,12 @@ public:
     }
 
 private:
-    Politica politica; // implementar despues
+    Politica politica;
     std::mutex m;
     std::condition_variable puede_entrar;
     long lectoras_activas = 0;
+    long lectoras_esperando = 0;
+    long escritoras_esperando = 0;
     bool escritora_activa = false;
 };
 
@@ -215,7 +224,11 @@ int main(int argc, char* argv[]) {
     }
 
     if (c.modo == Modo::Atomic) {
-        std::cerr << "Error: el modo atomic todavia no esta implementado.\n";
+        std::cerr << "error: el modo atomic todavia no esta implementado.\n";
+        return 1;
+    }
+    if (c.politica == Politica::Fifo) {
+        std::cerr << "error: la politica fifo todavia no esta implementada.\n";
         return 1;
     }
 

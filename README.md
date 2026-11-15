@@ -18,5 +18,5 @@ Ejemplos:
 
 ```sh
 ./rw cond lectores 3 2 5 1000 2000
-./rw cond lectores 2 2 3 0 0 notraza
+./rw cond escritores 2 2 3 0 0 notraza
 ```
