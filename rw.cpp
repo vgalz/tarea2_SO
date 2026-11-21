@@ -38,6 +38,15 @@ struct Diagnostico {
     std::atomic<long> lecturas_incoherentes{0};
 };
 
+
+//variables locales a cada hebra (thread_local hace que cada 
+//hebra tenga su propia copia de la variable)
+
+thread_local int id_hebra = -1;
+//guarda el turno que recibe una hebra en entrar_escritura
+//o entrar_lectura
+thread_local long turno_hebra = -1;
+
 // monitor principal
 class MonitorRW : public ControlRW {
 public:
@@ -45,13 +54,58 @@ public:
 
     void entrar_lectura() override {
         std::unique_lock<std::mutex> lock(m);
-        ++lectoras_esperando;
-        puede_entrar.wait(lock, [this] {
-            return !escritora_activa &&
-                   (politica == Politica::Lectores || escritoras_esperando == 0);
+        
+        //se inicializa el turno en -1 por si la politica no
+        //es FIFO
+        long mi_turno = -1;
+
+        if (politica == Politica::Fifo) {
+            //si la politica es fifo el turno de la hebra
+            //cambia al turno al siguiente +1
+            mi_turno = siguiente_turno++;
+        }
+
+        // se registra la solicitud en la traza antes de 
+        //comenzar a esperar
+        traza.push_back({
+            id_hebra, Tipo::Lectora, Accion::Pide, mi_turno
         });
+
+        ++lectoras_esperando;
+        
+        puede_entrar.wait(lock, [this, mi_turno] {
+
+            //caso fifo
+            if (politica == Politica::Fifo) {
+                return mi_turno == turno_actual &&
+                       !escritora_activa;
+            }
+
+            return !escritora_activa &&
+                   (politica == Politica::Lectores ||
+                    escritoras_esperando == 0);
+        });
+
         --lectoras_esperando;
         ++lectoras_activas;
+
+        //se registra la entrada en la traza
+        traza.push_back({
+            id_hebra, Tipo::Lectora, Accion::Entra, mi_turno
+        });
+
+
+        // avanzamos el turno cuando la lectora entra, en lugar
+        // de esperar a que salga. Esto permite que otras
+        // lectoras con turnos consecutivos tambien puedan entrar
+        // mientras la primera sigue leyendo.
+
+        if (politica == Politica::Fifo) {
+            // se evalua la evaluacion de la siguiente
+            //solicitud 
+            ++turno_actual;
+            puede_entrar.notify_all();
+        }
     }
 
     void salir_lectura() override {
@@ -87,6 +141,13 @@ private:
     long lectoras_esperando = 0;
     long escritoras_esperando = 0;
     bool escritora_activa = false;
+
+    //traza de admision
+    std::vector<AnotacionTraza> traza;
+
+    //variables de control de FIFO
+    long siguiente_turno = 0;
+    long turno_actual = 0;
 };
 
 void mostrar_uso(const char* programa) {
