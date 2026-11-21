@@ -39,12 +39,10 @@ struct Diagnostico {
 };
 
 
-//variables locales a cada hebra (thread_local hace que cada 
+//guarda el turno que recibe una hebra en entrar_escritura
+//o entrar_lectura (thread_local hace que cada 
 //hebra tenga su propia copia de la variable)
 
-thread_local int id_hebra = -1;
-//guarda el turno que recibe una hebra en entrar_escritura
-//o entrar_lectura
 thread_local long turno_hebra = -1;
 
 // monitor principal
@@ -62,7 +60,8 @@ public:
         if (politica == Politica::Fifo) {
             //si la politica es fifo el turno de la hebra
             //cambia al turno al siguiente +1
-            mi_turno = siguiente_turno++;
+            turno_hebra = siguiente_turno++;
+            mi_turno = turno_hebra;
         }
 
         // se registra la solicitud en la traza antes de 
@@ -110,6 +109,12 @@ public:
 
     void salir_lectura() override {
         std::lock_guard<std::mutex> lock(m);
+
+        //se añade la operacion a la traza
+        traza.push_back({
+            id_hebra, Tipo::Lectora, Accion::Sale, turno_hebra
+        });
+
         --lectoras_activas;
         if (lectoras_activas == 0) {
             puede_entrar.notify_all();
@@ -118,19 +123,70 @@ public:
 
     void entrar_escritura() override {
         std::unique_lock<std::mutex> lock(m);
-        ++escritoras_esperando;
-        puede_entrar.wait(lock, [this] {
-            return !escritora_activa && lectoras_activas == 0 &&
-                   (politica == Politica::Escritores || lectoras_esperando == 0);
+        
+        //turno por si la politica no es fifo
+        long mi_turno = -1;
+
+        if (politica == Politica::Fifo) {
+            //si la politica es fifo el turno de la hebra
+            //cambia al turno al siguiente +1
+            turno_hebra = siguiente_turno++;
+            mi_turno = turno_hebra;
+        }
+
+        // se registra la solicitud antes de esperar
+        traza.push_back({
+            id_hebra, Tipo::Escritora, Accion::Pide, mi_turno
         });
+
+        ++escritoras_esperando;
+
+        puede_entrar.wait(lock, [this, mi_turno] {
+            if (politica == Politica::Fifo) {
+                return mi_turno == turno_actual &&
+                       !escritora_activa &&
+                       lectoras_activas == 0;
+            }
+
+            return !escritora_activa &&
+                   lectoras_activas == 0 &&
+                   (politica == Politica::Escritores ||
+                    lectoras_esperando == 0);
+        });
+
         --escritoras_esperando;
         escritora_activa = true;
+
+        // se registra la entrada
+        traza.push_back({
+            id_hebra, Tipo::Escritora, Accion::Entra, mi_turno
+        });
+
     }
 
     void salir_escritura() override {
         std::lock_guard<std::mutex> lock(m);
+
+        //se registra la salida
+        traza.push_back({
+            id_hebra, Tipo::Escritora, Accion::Sale, turno_hebra
+        });
+
         escritora_activa = false;
+
+        if (politica == Politica::Fifo) {
+            // la escritora libera su turno al terminar.
+            ++turno_actual;
+        }
+
         puede_entrar.notify_all();
+    }
+
+// se obtiene una copia de la traza en mutex
+    // (permite veriricar la ejecucion)
+    std::vector<AnotacionTraza> obtener_traza() {
+        std::lock_guard<std::mutex> lock(m);
+        return traza;
     }
 
 private:
@@ -288,10 +344,6 @@ int main(int argc, char* argv[]) {
         std::cerr << "error: el modo atomic todavia no esta implementado.\n";
         return 1;
     }
-    if (c.politica == Politica::Fifo) {
-        std::cerr << "error: la politica fifo todavia no esta implementada.\n";
-        return 1;
-    }
 
     Registro registro;
     Diagnostico diagnostico;
@@ -301,12 +353,20 @@ int main(int argc, char* argv[]) {
     try {
         hebras.reserve(c.L + c.E);
         for (long i = 0; i < c.L; ++i) {
-            hebras.emplace_back([&] {
+            hebras.emplace_back([&,i] {
+                
+                //se le asigna id a la hebra
+                id_hebra = static_cast<int>(i);
+
                 ejecutar_lectora(control, registro, diagnostico, c.K, c.dur_lec_us);
             });
         }
         for (long i = 0; i < c.E; ++i) {
-            hebras.emplace_back([&] {
+            hebras.emplace_back([&,i] {
+                
+                // id's de escritoras comienzan despues de las lectoras
+                id_hebra = static_cast<int>(c.L + i);
+
                 ejecutar_escritora(control, registro, diagnostico, c.K, c.dur_esc_us);
             });
         }
