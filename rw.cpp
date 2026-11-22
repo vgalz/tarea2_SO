@@ -11,10 +11,17 @@
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
+#include <unordered_map>
+#include <string>
 
-enum class Modo { Cond, Atomic };
+enum class Modo
+{
+    Cond,
+    Atomic
+};
 
-struct Configuracion {
+struct Configuracion
+{
     Modo modo;
     Politica politica;
     long L;
@@ -25,12 +32,14 @@ struct Configuracion {
     bool traza_habilitada;
 };
 
-struct Registro {
+struct Registro
+{
     long version = 0;
     long doble_version = 0;
 };
 
-struct Diagnostico {
+struct Diagnostico
+{
     std::atomic<long> lectoras_dentro{0};
     std::atomic<long> escritoras_dentro{0};
     std::atomic<long> max_lectoras{0};
@@ -38,41 +47,42 @@ struct Diagnostico {
     std::atomic<long> lecturas_incoherentes{0};
 };
 
-
-//guarda el turno que recibe una hebra en entrar_escritura
-//o entrar_lectura (thread_local hace que cada 
-//hebra tenga su propia copia de la variable)
+// guarda el turno que recibe una hebra en entrar_escritura
+// o entrar_lectura (thread_local hace que cada
+// hebra tenga su propia copia de la variable)
 
 thread_local long turno_hebra = -1;
 
 // monitor principal
-class MonitorRW : public ControlRW {
+class MonitorRW : public ControlRW
+{
 public:
     explicit MonitorRW(Politica p) : politica(p) {}
 
-    void entrar_lectura() override {
+    void entrar_lectura() override
+    {
         std::unique_lock<std::mutex> lock(m);
-        
-        //se inicializa el turno en -1 por si la politica no
-        //es FIFO
+
+        // se inicializa el turno en -1 por si la politica no
+        // es FIFO
         long mi_turno = -1;
 
-        if (politica == Politica::Fifo) {
-            //si la politica es fifo el turno de la hebra
-            //cambia al turno al siguiente +1
+        if (politica == Politica::Fifo)
+        {
+            // si la politica es fifo el turno de la hebra
+            // cambia al turno al siguiente +1
             turno_hebra = siguiente_turno++;
             mi_turno = turno_hebra;
         }
 
-        // se registra la solicitud en la traza antes de 
-        //comenzar a esperar
-        traza.push_back({
-            id_hebra, Tipo::Lectora, Accion::Pide, mi_turno
-        });
+        // se registra la solicitud en la traza antes de
+        // comenzar a esperar
+        traza.push_back({id_hebra, Tipo::Lectora, Accion::Pide, mi_turno});
 
         ++lectoras_esperando;
-        
-        puede_entrar.wait(lock, [this, mi_turno] {
+
+        puede_entrar.wait(lock, [this, mi_turno]
+                          {
 
             //caso fifo
             if (politica == Politica::Fifo) {
@@ -82,66 +92,64 @@ public:
 
             return !escritora_activa &&
                    (politica == Politica::Lectores ||
-                    escritoras_esperando == 0);
-        });
+                    escritoras_esperando == 0); });
 
         --lectoras_esperando;
         ++lectoras_activas;
 
-        //se registra la entrada en la traza
-        traza.push_back({
-            id_hebra, Tipo::Lectora, Accion::Entra, mi_turno
-        });
-
+        // se registra la entrada en la traza
+        traza.push_back({id_hebra, Tipo::Lectora, Accion::Entra, mi_turno});
 
         // avanzamos el turno cuando la lectora entra, en lugar
         // de esperar a que salga. Esto permite que otras
         // lectoras con turnos consecutivos tambien puedan entrar
         // mientras la primera sigue leyendo.
 
-        if (politica == Politica::Fifo) {
+        if (politica == Politica::Fifo)
+        {
             // se evalua la evaluacion de la siguiente
-            //solicitud 
+            // solicitud
             ++turno_actual;
             puede_entrar.notify_all();
         }
     }
 
-    void salir_lectura() override {
+    void salir_lectura() override
+    {
         std::lock_guard<std::mutex> lock(m);
 
-        //se añade la operacion a la traza
-        traza.push_back({
-            id_hebra, Tipo::Lectora, Accion::Sale, turno_hebra
-        });
+        // se añade la operacion a la traza
+        traza.push_back({id_hebra, Tipo::Lectora, Accion::Sale, turno_hebra});
 
         --lectoras_activas;
-        if (lectoras_activas == 0) {
+        if (lectoras_activas == 0)
+        {
             puede_entrar.notify_all();
         }
     }
 
-    void entrar_escritura() override {
+    void entrar_escritura() override
+    {
         std::unique_lock<std::mutex> lock(m);
-        
-        //turno por si la politica no es fifo
+
+        // turno por si la politica no es fifo
         long mi_turno = -1;
 
-        if (politica == Politica::Fifo) {
-            //si la politica es fifo el turno de la hebra
-            //cambia al turno al siguiente +1
+        if (politica == Politica::Fifo)
+        {
+            // si la politica es fifo el turno de la hebra
+            // cambia al turno al siguiente +1
             turno_hebra = siguiente_turno++;
             mi_turno = turno_hebra;
         }
 
         // se registra la solicitud antes de esperar
-        traza.push_back({
-            id_hebra, Tipo::Escritora, Accion::Pide, mi_turno
-        });
+        traza.push_back({id_hebra, Tipo::Escritora, Accion::Pide, mi_turno});
 
         ++escritoras_esperando;
 
-        puede_entrar.wait(lock, [this, mi_turno] {
+        puede_entrar.wait(lock, [this, mi_turno]
+                          {
             if (politica == Politica::Fifo) {
                 return mi_turno == turno_actual &&
                        !escritora_activa &&
@@ -151,30 +159,26 @@ public:
             return !escritora_activa &&
                    lectoras_activas == 0 &&
                    (politica == Politica::Escritores ||
-                    lectoras_esperando == 0);
-        });
+                    lectoras_esperando == 0); });
 
         --escritoras_esperando;
         escritora_activa = true;
 
         // se registra la entrada
-        traza.push_back({
-            id_hebra, Tipo::Escritora, Accion::Entra, mi_turno
-        });
-
+        traza.push_back({id_hebra, Tipo::Escritora, Accion::Entra, mi_turno});
     }
 
-    void salir_escritura() override {
+    void salir_escritura() override
+    {
         std::lock_guard<std::mutex> lock(m);
 
-        //se registra la salida
-        traza.push_back({
-            id_hebra, Tipo::Escritora, Accion::Sale, turno_hebra
-        });
+        // se registra la salida
+        traza.push_back({id_hebra, Tipo::Escritora, Accion::Sale, turno_hebra});
 
         escritora_activa = false;
 
-        if (politica == Politica::Fifo) {
+        if (politica == Politica::Fifo)
+        {
             // la escritora libera su turno al terminar.
             ++turno_actual;
         }
@@ -182,9 +186,10 @@ public:
         puede_entrar.notify_all();
     }
 
-// se obtiene una copia de la traza en mutex
+    // se obtiene una copia de la traza en mutex
     // (permite veriricar la ejecucion)
-    std::vector<AnotacionTraza> obtener_traza() {
+    std::vector<AnotacionTraza> obtener_traza()
+    {
         std::lock_guard<std::mutex> lock(m);
         return traza;
     }
@@ -198,83 +203,105 @@ private:
     long escritoras_esperando = 0;
     bool escritora_activa = false;
 
-    //traza de admision
+    // traza de admision
     std::vector<AnotacionTraza> traza;
 
-    //variables de control de FIFO
+    // variables de control de FIFO
     long siguiente_turno = 0;
     long turno_actual = 0;
 };
 
-void mostrar_uso(const char* programa) {
+void mostrar_uso(const char *programa)
+{
     std::cerr << "Uso: " << programa
               << " <modo> <politica> <L> <E> <K>"
               << " <dur_lec_us> <dur_esc_us> [notraza]\n";
 }
 
 // conversion estricta que no admite texto adicional, decimales ni desbordamiento.
-bool leer_long(std::string_view texto, long& resultado) {
+bool leer_long(std::string_view texto, long &resultado)
+{
     const auto conversion = std::from_chars(texto.data(), texto.data() + texto.size(), resultado);
     return conversion.ec == std::errc{} && conversion.ptr == texto.data() + texto.size();
 }
 
-bool leer_configuracion(int argc, char* argv[], Configuracion& c) {
-    if (argc != 8 && argc != 9) {
+bool leer_configuracion(int argc, char *argv[], Configuracion &c)
+{
+    if (argc != 8 && argc != 9)
+    {
         std::cerr << "Error: cantidad de argumentos incorrecta.\n";
         return false;
     }
 
     const std::string_view modo = argv[1];
-    if (modo == "cond") {
+    if (modo == "cond")
+    {
         c.modo = Modo::Cond;
-    } else if (modo == "atomic") {
+    }
+    else if (modo == "atomic")
+    {
         c.modo = Modo::Atomic;
-    } else {
+    }
+    else
+    {
         std::cerr << "Error: modo invalido.\n";
         return false;
     }
 
     const std::string_view politica = argv[2];
-    if (politica == "lectores") {
+    if (politica == "lectores")
+    {
         c.politica = Politica::Lectores;
-    } else if (politica == "escritores") {
+    }
+    else if (politica == "escritores")
+    {
         c.politica = Politica::Escritores;
-    } else if (politica == "fifo") {
+    }
+    else if (politica == "fifo")
+    {
         c.politica = Politica::Fifo;
-    } else {
+    }
+    else
+    {
         std::cerr << "Error: politica invalida.\n";
         return false;
     }
 
-    if (c.modo == Modo::Atomic && c.politica != Politica::Escritores) {
+    if (c.modo == Modo::Atomic && c.politica != Politica::Escritores)
+    {
         std::cerr << "Error: modo atomic solo permite politica escritores.\n";
         return false;
     }
 
     if (!leer_long(argv[3], c.L) || !leer_long(argv[4], c.E) ||
         !leer_long(argv[5], c.K) || !leer_long(argv[6], c.dur_lec_us) ||
-        !leer_long(argv[7], c.dur_esc_us)) {
+        !leer_long(argv[7], c.dur_esc_us))
+    {
         std::cerr << "Error: parametros numericos invalidos.\n";
         return false;
     }
 
-    if (c.L < 1 || c.E < 1 || c.L > 1000 - c.E) {
+    if (c.L < 1 || c.E < 1 || c.L > 1000 - c.E)
+    {
         std::cerr << "Error: se requiere L >= 1, E >= 1 y L + E <= 1000.\n";
         return false;
     }
 
-    if (c.K < 1 || c.dur_lec_us < 0 || c.dur_esc_us < 0) {
+    if (c.K < 1 || c.dur_lec_us < 0 || c.dur_esc_us < 0)
+    {
         std::cerr << "Error: K >= 1 y ambas duraciones >= 0.\n";
         return false;
     }
 
     // se comprueban los productos sin multiplicar para evitar desbordamientos.
-    if (c.K > LONG_MAX / (2 * c.E) || c.K > LONG_MAX / (c.L + c.E)) {
+    if (c.K > LONG_MAX / (2 * c.E) || c.K > LONG_MAX / (c.L + c.E))
+    {
         std::cerr << "Error: 2*E*K o (L+E)*K no cabe en long.\n";
         return false;
     }
 
-    if (argc == 9 && std::string_view(argv[8]) != "notraza") {
+    if (argc == 9 && std::string_view(argv[8]) != "notraza")
+    {
         std::cerr << "Error: argumento opcional invalido.\n";
         return false;
     }
@@ -282,29 +309,37 @@ bool leer_configuracion(int argc, char* argv[], Configuracion& c) {
     return true;
 }
 
-void simular_trabajo(long duracion_us) {
-    if (duracion_us > 0) {
+void simular_trabajo(long duracion_us)
+{
+    if (duracion_us > 0)
+    {
         std::this_thread::sleep_for(std::chrono::microseconds(duracion_us));
     }
 }
 
-void ejecutar_lectora(ControlRW& control, const Registro& registro,
-                     Diagnostico& diagnostico, long k, long duracion_us) {
-    for (long op = 0; op < k; ++op) {
+void ejecutar_lectora(ControlRW &control, const Registro &registro,
+                      Diagnostico &diagnostico, long k, long duracion_us)
+{
+    for (long op = 0; op < k; ++op)
+    {
         control.entrar_lectura();
 
         const long lectoras = diagnostico.lectoras_dentro.fetch_add(1) + 1;
-        if (diagnostico.escritoras_dentro.load() != 0) {
+        if (diagnostico.escritoras_dentro.load() != 0)
+        {
             ++diagnostico.conflictos;
         }
 
         long maximo = diagnostico.max_lectoras.load();
         while (lectoras > maximo &&
-               !diagnostico.max_lectoras.compare_exchange_weak(maximo, lectoras)) {}
+               !diagnostico.max_lectoras.compare_exchange_weak(maximo, lectoras))
+        {
+        }
 
         const long version = registro.version;
         const long doble_version = registro.doble_version;
-        if (doble_version != 2 * version) {
+        if (doble_version != 2 * version)
+        {
             ++diagnostico.lecturas_incoherentes;
         }
         simular_trabajo(duracion_us);
@@ -314,13 +349,16 @@ void ejecutar_lectora(ControlRW& control, const Registro& registro,
     }
 }
 
-void ejecutar_escritora(ControlRW& control, Registro& registro,
-                       Diagnostico& diagnostico, long k, long duracion_us) {
-    for (long op = 0; op < k; ++op) {
+void ejecutar_escritora(ControlRW &control, Registro &registro,
+                        Diagnostico &diagnostico, long k, long duracion_us)
+{
+    for (long op = 0; op < k; ++op)
+    {
         control.entrar_escritura();
 
         if (diagnostico.escritoras_dentro.fetch_add(1) + 1 != 1 ||
-            diagnostico.lectoras_dentro.load() != 0) {
+            diagnostico.lectoras_dentro.load() != 0)
+        {
             ++diagnostico.conflictos;
         }
 
@@ -333,14 +371,299 @@ void ejecutar_escritora(ControlRW& control, Registro& registro,
     }
 }
 
-int main(int argc, char* argv[]) {
+
+//guarda estadisticas que demuestran que las politicas de 
+//lectores y escritores están funcionando de acuerdo con sus
+//respectivas reglas
+
+struct Evidencia
+{
+    long lectores_con_escritoras_pendientes = 0;
+    long escritores_lectoras_con_escritoras_pendientes = 0;
+    long fifo_lectoras_con_lectoras_activas = 0;
+};
+
+bool verificar_traza(
+    const std::vector<AnotacionTraza> &traza,
+    Politica politica)
+{
+    long lectoras_activas = 0;
+    long escritoras_activas = 0;
+
+    long lectoras_pendientes = 0;
+    long escritoras_pendientes = 0;
+
+    long entradas_fifo = 0;
+
+    Evidencia evidencia;
+
+    // Solicitudes que pidieron entrar y todavía no entran.
+    std::unordered_map<int, AnotacionTraza> pendientes;
+
+    // Hebras que actualmente están dentro del recurso.
+    std::unordered_map<int, AnotacionTraza> activas;
+
+    bool correcto = true;
+
+    auto violacion = [&](long i, const std::string &regla)
+    {
+        std::cerr << "Violacion en anotacion " << i
+                  << ": " << regla << '\n';
+        correcto = false;
+    };
+
+    for (long i = 0; i < static_cast<long>(traza.size()); ++i)
+    {
+        const auto &a = traza[i];
+
+        switch (a.accion)
+        {
+
+        case Accion::Pide:
+        {
+
+            // Una hebra no puede tener dos solicitudes pendientes.
+            if (pendientes.count(a.hebra) != 0 ||
+                activas.count(a.hebra) != 0)
+            {
+                violacion(i, "Solicitud duplicada de una hebra");
+                break;
+            }
+
+            pendientes[a.hebra] = a;
+
+            if (a.tipo == Tipo::Lectora)
+            {
+                ++lectoras_pendientes;
+
+                if (politica == Politica::Escritores &&
+                    escritoras_pendientes > 0)
+                {
+                    ++evidencia.escritores_lectoras_con_escritoras_pendientes;
+                }
+
+                // Con prioridad de lectores, si no hay escritora
+                // activa, la lectora debe entrar inmediatamente.
+                if (politica == Politica::Lectores &&
+                    escritoras_activas == 0)
+                {
+
+                    if (i + 1 >= static_cast<long>(traza.size()) ||
+                        traza[i + 1].accion != Accion::Entra ||
+                        traza[i + 1].hebra != a.hebra ||
+                        traza[i + 1].tipo != Tipo::Lectora ||
+                        traza[i + 1].turno != a.turno)
+
+                    {
+
+                        violacion(i,
+                                  "Una lectora pidio sin escritora activa "
+                                  "pero no entro inmediatamente");
+                    }
+                }
+            }
+            else
+            {
+                ++escritoras_pendientes;
+            }
+
+            break;
+        }
+
+        case Accion::Entra:
+        {
+
+            auto it = pendientes.find(a.hebra);
+
+            if (it == pendientes.end())
+            {
+                violacion(i, "Entra sin una solicitud Pide previa");
+                break;
+            }
+
+            if (it->second.tipo != a.tipo ||
+                it->second.turno != a.turno)
+            {
+                violacion(i, "Tipo o turno distinto al de Pide");
+                break;
+            }
+
+            // Dejar de considerar esta solicitud pendiente.
+            if (a.tipo == Tipo::Lectora)
+            {
+                --lectoras_pendientes;
+            }
+            else
+            {
+                --escritoras_pendientes;
+            }
+
+            pendientes.erase(it);
+
+            if (a.tipo == Tipo::Lectora)
+            {
+
+                // Regla de exclusion mutua: no leer mientras
+                // una escritora esta activa.
+                if (escritoras_activas != 0)
+                {
+                    violacion(i,
+                              "Una lectora entro mientras habia "
+                              "una escritora activa");
+                }
+
+                // Prioridad de escritores.
+                if (politica == Politica::Escritores &&
+                    escritoras_pendientes > 0)
+                {
+                    violacion(i,
+                              "Una lectora entro mientras habia "
+                              "escritoras pendientes");
+                }
+
+                // Evidencia de prioridad de lectores.
+                if (politica == Politica::Lectores &&
+                    escritoras_pendientes > 0)
+                {
+                    ++evidencia.lectores_con_escritoras_pendientes;
+                }
+
+                // Evidencia de admision simultanea FIFO.
+                if (politica == Politica::Fifo &&
+                    lectoras_activas > 0)
+                {
+                    ++evidencia.fifo_lectoras_con_lectoras_activas;
+                }
+
+                ++lectoras_activas;
+            }
+            else
+            {
+
+                // Una escritora necesita exclusividad total.
+                if (escritoras_activas != 0 ||
+                    lectoras_activas != 0)
+                {
+                    violacion(i,
+                              "Una escritora entro mientras habia "
+                              "lectoras o escritoras activas");
+                }
+
+                // Prioridad de lectores.
+                if (politica == Politica::Lectores &&
+                    lectoras_pendientes > 0)
+                {
+                    violacion(i,
+                              "Una escritora entro mientras habia "
+                              "lectoras pendientes");
+                }
+
+                ++escritoras_activas;
+            }
+
+            // FIFO: el k-esimo Entra debe tener turno k.
+            if (politica == Politica::Fifo)
+            {
+                if (a.turno != entradas_fifo)
+                {
+                    violacion(i,
+                              "El turno de entrada no respeta FIFO");
+                }
+
+                ++entradas_fifo;
+            }
+
+            activas[a.hebra] = a;
+
+            break;
+        }
+
+        case Accion::Sale:
+        {
+
+            auto it = activas.find(a.hebra);
+
+            if (it == activas.end())
+            {
+                violacion(i, "Sale sin una entrada previa");
+                break;
+            }
+
+            if (it->second.turno != a.turno ||
+                it->second.tipo != a.tipo)
+            {
+                violacion(i, "Tipo o turno incorrecto en Sale");
+            }
+
+            // Utilizar el tipo de la entrada registrada.
+            if (it->second.tipo == Tipo::Lectora)
+            {
+                --lectoras_activas;
+            }
+            else
+            {
+                --escritoras_activas;
+            }
+
+            activas.erase(it);
+
+            break;
+        }
+        }
+    }
+
+    if (!pendientes.empty())
+    {
+        std::cerr << "Error: quedaron solicitudes pendientes.\n";
+        correcto = false;
+    }
+
+    if (!activas.empty())
+    {
+        std::cerr << "Error: quedaron hebras dentro del recurso.\n";
+        correcto = false;
+    }
+
+    // Comprobar que los contadores reconstruidos terminaron en cero.
+    if (lectoras_activas != 0 ||
+        escritoras_activas != 0 ||
+        lectoras_pendientes != 0 ||
+        escritoras_pendientes != 0)
+    {
+        violacion(traza.size(), "Los contadores finales no son cero");
+    }
+
+    std::cout << "\n--- Evidencia de politicas ---\n";
+
+    std::cout << "Lectores: lectoras que entraron mientras "
+              << "habia escritoras pendientes: "
+              << evidencia.lectores_con_escritoras_pendientes
+              << '\n';
+
+    std::cout << "Escritores: lectoras que pidieron mientras "
+              << "habia escritoras pendientes: "
+              << evidencia.escritores_lectoras_con_escritoras_pendientes
+              << '\n';
+
+    std::cout << "FIFO: lectoras que entraron mientras "
+              << "otra lectora estaba activa: "
+              << evidencia.fifo_lectoras_con_lectoras_activas
+              << '\n';
+
+    return correcto;
+}
+
+int main(int argc, char *argv[])
+{
     Configuracion c{};
-    if (!leer_configuracion(argc, argv, c)) {
+    if (!leer_configuracion(argc, argv, c))
+    {
         mostrar_uso(argv[0]);
         return 1;
     }
 
-    if (c.modo == Modo::Atomic) {
+    if (c.modo == Modo::Atomic)
+    {
         std::cerr << "error: el modo atomic todavia no esta implementado.\n";
         return 1;
     }
@@ -350,37 +673,66 @@ int main(int argc, char* argv[]) {
     MonitorRW control(c.politica);
     std::vector<std::thread> hebras;
 
-    try {
+    try
+    {
         hebras.reserve(c.L + c.E);
-        for (long i = 0; i < c.L; ++i) {
-            hebras.emplace_back([&,i] {
+        for (long i = 0; i < c.L; ++i)
+        {
+            hebras.emplace_back([&, i]
+                                {
                 
                 //se le asigna id a la hebra
                 id_hebra = static_cast<int>(i);
 
-                ejecutar_lectora(control, registro, diagnostico, c.K, c.dur_lec_us);
-            });
+                ejecutar_lectora(control, registro, diagnostico, c.K, c.dur_lec_us); });
         }
-        for (long i = 0; i < c.E; ++i) {
-            hebras.emplace_back([&,i] {
+        for (long i = 0; i < c.E; ++i)
+        {
+            hebras.emplace_back([&, i]
+                                {
                 
                 // id's de escritoras comienzan despues de las lectoras
                 id_hebra = static_cast<int>(c.L + i);
 
-                ejecutar_escritora(control, registro, diagnostico, c.K, c.dur_esc_us);
-            });
+                ejecutar_escritora(control, registro, diagnostico, c.K, c.dur_esc_us); });
         }
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception &e)
+    {
         std::cerr << "Error al crear hebras: " << e.what() << '\n';
-        for (auto& hebra : hebras) {
+        for (auto &hebra : hebras)
+        {
             hebra.join();
         }
+
+        std::vector<AnotacionTraza> traza = control.obtener_traza();
+
+        if (!verificar_traza(traza, c.politica))
+        {
+            std::cerr << "error: la traza contiene violaciones.\n";
+            return 1;
+        }
+
+        std::cout << "La traza cumple las reglas de admision.\n";
+
         return 1;
     }
 
-    for (auto& hebra : hebras) {
+    for (auto &hebra : hebras)
+    {
         hebra.join();
     }
+
+    // Verificar la traza una vez que todas las hebras terminaron.
+    std::vector<AnotacionTraza> traza = control.obtener_traza();
+
+    if (!verificar_traza(traza, c.politica))
+    {
+        std::cerr << "Error: la traza contiene violaciones.\n";
+        return 1;
+    }
+
+    std::cout << "La traza cumple las reglas de admision.\n";
 
     const long total_escrituras = c.E * c.K;
     if (registro.version != total_escrituras ||
@@ -388,7 +740,8 @@ int main(int argc, char* argv[]) {
         diagnostico.lecturas_incoherentes.load() != 0 ||
         diagnostico.conflictos.load() != 0 ||
         diagnostico.lectoras_dentro.load() != 0 ||
-        diagnostico.escritoras_dentro.load() != 0) {
+        diagnostico.escritoras_dentro.load() != 0)
+    {
         std::cerr << "error: no se cumplieron las invariantes de R2.\n";
         return 1;
     }
